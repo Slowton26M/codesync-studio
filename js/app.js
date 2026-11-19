@@ -1,16 +1,15 @@
 import { LANGUAGES, USER_COLORS, compileAndRunCode } from './compilers.js';
 import { RoomCollaborationEngine } from './collab.js';
 
-// Curated default personas so opening multiple browser tabs automatically gives each tab a unique name & color
 const DEFAULT_PERSONAS = [
+  'Guest Developer',
   'Alex Rivera',
   'Jordan Chen',
   'Taylor Kim',
   'Morgan Vance',
   'Casey Patel',
   'Riley Novak',
-  'Quinn Sterling',
-  'Avery Brooks'
+  'Quinn Sterling'
 ];
 
 class CodeSyncApp {
@@ -24,9 +23,11 @@ class CodeSyncApp {
     this.remoteDecorations = [];
     this.typingTimeout = null;
     this.allUsers = [];
+    this.authTabMode = 'signin'; // 'signin' | 'signup'
 
     this._initIdentityAndRoom();
     this._bindDOMEvents();
+    this._updateAuthHeaderUI();
     this._loadMonacoEditor();
   }
 
@@ -40,19 +41,43 @@ class CodeSyncApp {
     }
     this.roomId = roomParam.toUpperCase();
 
-    // Per-tab identity using sessionStorage so opening a 2nd tab creates a 2nd distinct user & color!
+    // 1. Check if user has an active authenticated session (Google or CodeSync Account)
+    let activeAccount = null;
+    try {
+      activeAccount = JSON.parse(localStorage.getItem('codesync_active_account_v1'));
+    } catch (_) {}
+
+    // 2. Otherwise check per-tab guest session
     let savedUser = null;
     try {
       savedUser = JSON.parse(sessionStorage.getItem('codesync_tab_user'));
     } catch (_) {}
 
-    if (!savedUser) {
+    if (activeAccount && activeAccount.email) {
+      const colorObj = USER_COLORS.find(c => c.hex === activeAccount.color) || USER_COLORS[0];
+      savedUser = {
+        id: savedUser?.id || ('usr-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 6)),
+        name: activeAccount.name,
+        email: activeAccount.email,
+        authProvider: activeAccount.authProvider || 'account', // 'google' | 'account'
+        color: colorObj.hex,
+        bg: colorObj.bg,
+        role: savedUser?.role || 'editor',
+        activeFileId: savedUser?.activeFileId || 'file-cpp',
+        cursor: { lineNumber: 1, column: 1 },
+        selection: null,
+        isTyping: false
+      };
+      sessionStorage.setItem('codesync_tab_user', JSON.stringify(savedUser));
+    } else if (!savedUser) {
       const tabIndex = Math.floor(Math.random() * USER_COLORS.length);
       const colorObj = USER_COLORS[tabIndex];
       const personaName = DEFAULT_PERSONAS[tabIndex % DEFAULT_PERSONAS.length];
       savedUser = {
         id: 'usr-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 6),
         name: personaName,
+        email: null,
+        authProvider: 'guest',
         color: colorObj.hex,
         bg: colorObj.bg,
         role: 'editor',
@@ -66,6 +91,17 @@ class CodeSyncApp {
 
     this.currentUser = savedUser;
     document.getElementById('room-code-display').textContent = this.roomId;
+  }
+
+  _updateAuthHeaderUI() {
+    const signInBtn = document.getElementById('btn-auth-trigger');
+    const isAuthed = this.currentUser.authProvider === 'google' || this.currentUser.authProvider === 'account';
+
+    if (isAuthed && this.currentUser.email) {
+      signInBtn.classList.add('hidden');
+    } else {
+      signInBtn.classList.remove('hidden');
+    }
   }
 
   _loadMonacoEditor() {
@@ -94,13 +130,11 @@ class CodeSyncApp {
         startCollabAndMount();
       });
     } else {
-      // Fallback if CDN script is still loading
       window.addEventListener('load', () => this._loadMonacoEditor(), { once: true });
     }
   }
 
   _createMonacoInstance() {
-    // Define custom High-Craft Dark theme
     this.monaco.editor.defineTheme('codesync-dark', {
       base: 'vs-dark',
       inherit: true,
@@ -140,7 +174,6 @@ class CodeSyncApp {
       readOnly: this.currentUser.role === 'observer'
     });
 
-    // Listen to local code edits
     this.editor.onDidChangeModelContent(() => {
       if (this.isApplyingRemoteEdit) return;
       if (this.currentUser.role === 'observer') return;
@@ -165,7 +198,6 @@ class CodeSyncApp {
       }, 900);
     });
 
-    // Listen to cursor / selection changes
     this.editor.onDidChangeCursorSelection((e) => {
       if (!this.collab) return;
       const pos = e.selection.getPosition();
@@ -184,11 +216,9 @@ class CodeSyncApp {
       });
     });
 
-    // Re-position floating remote cursor flags on scroll or layout change
     this.editor.onDidScrollChange(() => this._renderRemoteCursorsInEditor());
     this.editor.onDidLayoutChange(() => this._renderRemoteCursorsInEditor());
 
-    // Keyboard shortcut: Ctrl+Enter / Cmd+Enter to Compile & Run
     this.editor.addCommand(this.monaco.KeyMod.CtrlCmd | this.monaco.KeyCode.Enter, () => {
       this.handleCompileAndRun();
     });
@@ -199,7 +229,6 @@ class CodeSyncApp {
       roomId: this.roomId,
       user: this.currentUser,
       onStateSync: (state) => {
-        // Ensure activeFileId exists
         if (!state.files.some(f => f.id === this.activeFileId)) {
           this.activeFileId = state.files[0].id;
         }
@@ -233,7 +262,6 @@ class CodeSyncApp {
         this._renderFileTabs();
         this._renderRemoteCursorsInEditor();
 
-        // If following a user, jump to their active file & line
         if (this.followingUserId) {
           const target = users.find(u => u.id === this.followingUserId);
           if (target) {
@@ -272,7 +300,6 @@ class CodeSyncApp {
     this.activeFileId = file.id;
     const langObj = LANGUAGES[file.language] || LANGUAGES.cpp;
 
-    // Update language dropdown
     const selectEl = document.getElementById('language-select');
     if (selectEl) selectEl.value = file.language;
 
@@ -318,7 +345,6 @@ class CodeSyncApp {
       const lang = LANGUAGES[file.language] || LANGUAGES.cpp;
       const isActive = file.id === this.activeFileId;
 
-      // Find peers currently viewing this file
       const peersOnFile = this.allUsers.filter(u => !u.isSelf && u.activeFileId === file.id);
 
       const tab = document.createElement('button');
@@ -386,9 +412,6 @@ class CodeSyncApp {
     }
   }
 
-  /**
-   * Renders Google-Docs-style colored remote carets, floating name flags, and selection highlights inside Monaco
-   */
   _renderRemoteCursorsInEditor() {
     if (!this.editor || !this.monaco) return;
     const overlay = document.getElementById('remote-cursor-overlay');
@@ -405,7 +428,6 @@ class CodeSyncApp {
       const lineNumber = peer.cursor.lineNumber || 1;
       const column = peer.cursor.column || 1;
 
-      // 1. If peer has a text selection range, add a colored translucent highlight decoration
       if (peer.selection) {
         const className = this._ensureDynamicSelectionCss(peer.id, peer.bg, peer.color);
         newDecorations.push({
@@ -422,11 +444,9 @@ class CodeSyncApp {
         });
       }
 
-      // 2. Compute pixel coordinates in Monaco viewport for floating Google-Docs flag & caret
       const coords = this.editor.getScrolledVisiblePosition({ lineNumber, column });
       if (!coords) return;
 
-      // Caret bar
       const caret = document.createElement('div');
       caret.className = 'remote-caret-bar';
       caret.style.backgroundColor = peer.color;
@@ -434,7 +454,6 @@ class CodeSyncApp {
       caret.style.top = `${coords.top}px`;
       caret.style.left = `${coords.left}px`;
 
-      // Floating Name & Role Flag
       const flag = document.createElement('div');
       flag.className = 'remote-cursor-flag';
       flag.style.backgroundColor = peer.color;
@@ -468,7 +487,6 @@ class CodeSyncApp {
   }
 
   _renderPresenceUI(users) {
-    // 1. Top navbar avatar pills
     const stackEl = document.getElementById('presence-avatar-stack');
     stackEl.innerHTML = '';
 
@@ -484,7 +502,7 @@ class CodeSyncApp {
       pill.className = `presence-avatar ${this.followingUserId === u.id ? 'following' : ''}`;
       pill.style.setProperty('--user-color', u.color);
       pill.title = u.isSelf
-        ? `${u.name} (You — click to customize profile & color)`
+        ? `${u.name} (You — click to customize color or switch room)`
         : `Click to follow ${u.name} (${u.role === 'observer' ? 'Observing' : 'Editing'})`;
 
       pill.innerHTML = `
@@ -504,7 +522,6 @@ class CodeSyncApp {
       stackEl.appendChild(pill);
     });
 
-    // 2. Sidebar participant cards
     const countEl = document.getElementById('participants-count');
     if (countEl) countEl.textContent = `${users.length} Online`;
 
@@ -516,6 +533,9 @@ class CodeSyncApp {
       const fileObj = this.collab?.state.files.find(f => f.id === u.activeFileId);
       const fileName = fileObj ? fileObj.name : 'main.cpp';
       const lineNum = u.cursor?.lineNumber || 1;
+      const verifiedBadge = u.authProvider === 'google'
+        ? '<span title="Verified Google Account" style="color:#38bdf8;font-size:11px;margin-left:4px">● Google</span>'
+        : (u.authProvider === 'account' ? '<span title="Registered Account" style="color:#10b981;font-size:11px;margin-left:4px">✓</span>' : '');
 
       const card = document.createElement('div');
       card.className = 'participant-card';
@@ -526,7 +546,7 @@ class CodeSyncApp {
           </div>
           <div class="participant-meta">
             <div class="participant-name">
-              ${this._escapeHtml(u.name)} ${u.isSelf ? '<span style="color:var(--text-muted);font-weight:400">(You)</span>' : ''}
+              ${this._escapeHtml(u.name)}${verifiedBadge} ${u.isSelf ? '<span style="color:var(--text-muted);font-weight:400">(You)</span>' : ''}
             </div>
             <div class="participant-cursor-loc">
               ${this._escapeHtml(fileName)} : Ln ${lineNum} ${u.isTyping ? '• typing...' : ''}
@@ -673,11 +693,204 @@ class CodeSyncApp {
     container.scrollTop = container.scrollHeight;
   }
 
+  /* ============================================================================
+   * Authentication System: Google Sign-In & Email/Password Create Account / Login
+   * ============================================================================ */
+
+  openAuthModal(defaultTab = 'signin') {
+    const modal = document.getElementById('auth-modal');
+    document.getElementById('google-picker-drawer').classList.add('hidden');
+    document.getElementById('auth-error-msg').classList.add('hidden');
+    this._switchAuthTab(defaultTab);
+    this._renderAuthColorSwatches();
+    modal.classList.remove('hidden');
+  }
+
+  _switchAuthTab(tab) {
+    this.authTabMode = tab;
+    document.querySelectorAll('.auth-tab').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.authTab === tab);
+    });
+
+    const isSignup = tab === 'signup';
+    document.getElementById('auth-name-group').classList.toggle('hidden', !isSignup);
+    document.getElementById('auth-color-group').classList.toggle('hidden', !isSignup);
+    document.getElementById('auth-name-input').required = isSignup;
+    document.getElementById('btn-auth-submit').textContent = isSignup
+      ? 'Create Account & Join Room'
+      : 'Sign In to CodeSync';
+    document.getElementById('auth-error-msg').classList.add('hidden');
+  }
+
+  _renderAuthColorSwatches() {
+    const container = document.getElementById('auth-color-swatches');
+    const modal = document.getElementById('auth-modal');
+    container.innerHTML = '';
+
+    let selectedColor = USER_COLORS.find(c => c.hex === this.currentUser.color) || USER_COLORS[0];
+    modal.dataset.selectedHex = selectedColor.hex;
+    modal.dataset.selectedBg = selectedColor.bg;
+
+    USER_COLORS.forEach((c) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `color-swatch-btn ${c.hex === selectedColor.hex ? 'selected' : ''}`;
+      btn.style.backgroundColor = c.hex;
+      btn.title = c.name;
+      btn.addEventListener('click', () => {
+        selectedColor = c;
+        modal.dataset.selectedHex = c.hex;
+        modal.dataset.selectedBg = c.bg;
+        container.querySelectorAll('.color-swatch-btn').forEach(b => b.classList.remove('selected'));
+        btn.classList.add('selected');
+      });
+      container.appendChild(btn);
+    });
+  }
+
+  _getStoredAccounts() {
+    try {
+      return JSON.parse(localStorage.getItem('codesync_accounts_v1')) || [];
+    } catch (_) {
+      return [];
+    }
+  }
+
+  _saveStoredAccounts(accounts) {
+    try {
+      localStorage.setItem('codesync_accounts_v1', JSON.stringify(accounts));
+    } catch (_) {}
+  }
+
+  _completeSignIn({ name, email, color, bg, authProvider }) {
+    const colorObj = USER_COLORS.find(c => c.hex === color) || USER_COLORS[0];
+    const activeAccount = {
+      name,
+      email: email.toLowerCase(),
+      color: colorObj.hex,
+      bg: bg || colorObj.bg,
+      authProvider // 'google' | 'account'
+    };
+
+    localStorage.setItem('codesync_active_account_v1', JSON.stringify(activeAccount));
+
+    this.currentUser.name = activeAccount.name;
+    this.currentUser.email = activeAccount.email;
+    this.currentUser.color = activeAccount.color;
+    this.currentUser.bg = activeAccount.bg;
+    this.currentUser.authProvider = activeAccount.authProvider;
+    sessionStorage.setItem('codesync_tab_user', JSON.stringify(this.currentUser));
+
+    document.getElementById('auth-modal').classList.add('hidden');
+    this._updateAuthHeaderUI();
+
+    if (this.collab) {
+      this.collab.updateLocalUser({
+        name: this.currentUser.name,
+        email: this.currentUser.email,
+        color: this.currentUser.color,
+        bg: this.currentUser.bg,
+        authProvider: this.currentUser.authProvider
+      });
+      this.collab.sendChatMessage(
+        `${this.currentUser.name} signed in via ${authProvider === 'google' ? 'Google' : 'CodeSync Account'}`,
+        true
+      );
+    }
+
+    this.showToast(`Signed in as ${this.currentUser.name} (${this.currentUser.email})`);
+  }
+
+  signOut() {
+    localStorage.removeItem('codesync_active_account_v1');
+    const prevName = this.currentUser.name;
+    this.currentUser.authProvider = 'guest';
+    this.currentUser.email = null;
+    sessionStorage.setItem('codesync_tab_user', JSON.stringify(this.currentUser));
+
+    this._updateAuthHeaderUI();
+    document.getElementById('profile-modal').classList.add('hidden');
+
+    if (this.collab) {
+      this.collab.updateLocalUser({
+        authProvider: 'guest',
+        email: null
+      });
+      this.collab.sendChatMessage(`${prevName} signed out to Guest mode`, true);
+    }
+
+    this.showToast('Signed out. You are now browsing as Guest.');
+  }
+
+  _toggleGoogleAccountDrawer() {
+    const drawer = document.getElementById('google-picker-drawer');
+    const isHidden = drawer.classList.contains('hidden');
+    if (!isHidden) {
+      drawer.classList.add('hidden');
+      return;
+    }
+
+    const listEl = document.getElementById('google-accounts-list');
+    listEl.innerHTML = '';
+
+    // Suggest saved accounts or quick Google account presets
+    const existingAccounts = this._getStoredAccounts().filter(a => a.authProvider === 'google');
+    const defaultGooglePresets = existingAccounts.length > 0 ? existingAccounts : [
+      {
+        name: 'Minh Huynh',
+        email: 'useforcoding123@gmail.com',
+        color: '#6366f1',
+        bg: 'rgba(99, 102, 241, 0.22)'
+      }
+    ];
+
+    defaultGooglePresets.forEach((acc) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'google-account-option';
+      btn.innerHTML = `
+        <div style="display:flex;align-items:center;gap:9px">
+          <span class="participant-swatch" style="background:${acc.color || '#4285F4'};width:28px;height:28px">
+            ${this._escapeHtml(acc.name.charAt(0).toUpperCase())}
+          </span>
+          <div>
+            <div style="font-size:12.5px;font-weight:600;color:var(--text-primary)">${this._escapeHtml(acc.name)}</div>
+            <div style="font-size:11px;color:var(--text-secondary)">${this._escapeHtml(acc.email)}</div>
+          </div>
+        </div>
+        <span style="font-size:11px;color:#60a5fa;font-weight:600">Continue →</span>
+      `;
+      btn.addEventListener('click', () => {
+        this._completeSignIn({
+          name: acc.name,
+          email: acc.email,
+          color: acc.color || '#6366f1',
+          bg: acc.bg || 'rgba(99, 102, 241, 0.22)',
+          authProvider: 'google'
+        });
+      });
+      listEl.appendChild(btn);
+    });
+
+    drawer.classList.remove('hidden');
+  }
+
   openProfileModal() {
     const modal = document.getElementById('profile-modal');
     const nameInput = document.getElementById('modal-user-name');
     const roomInput = document.getElementById('modal-room-code');
     const swatchesContainer = document.getElementById('modal-color-swatches');
+    const summaryEl = document.getElementById('profile-account-summary');
+    const authActionBtn = document.getElementById('btn-profile-auth-action');
+
+    const isAuthed = this.currentUser.authProvider === 'google' || this.currentUser.authProvider === 'account';
+    if (isAuthed && this.currentUser.email) {
+      summaryEl.innerHTML = `Signed in as <strong>${this._escapeHtml(this.currentUser.email)}</strong> (${this.currentUser.authProvider === 'google' ? 'Google' : 'Account'})`;
+      authActionBtn.textContent = 'Sign Out';
+    } else {
+      summaryEl.innerHTML = `Collaborating as <strong>Guest</strong>`;
+      authActionBtn.textContent = 'Sign In / Create Account';
+    }
 
     nameInput.value = this.currentUser.name;
     roomInput.value = this.roomId;
@@ -711,7 +924,6 @@ class CodeSyncApp {
   }
 
   _bindDOMEvents() {
-    // Populate language selector
     const langSelect = document.getElementById('language-select');
     langSelect.innerHTML = Object.values(LANGUAGES)
       .map(l => `<option value="${l.id}">${l.name} (${l.version})</option>`)
@@ -725,11 +937,9 @@ class CodeSyncApp {
         const nextLangObj = LANGUAGES[newLang];
         file.language = newLang;
 
-        // Update file extension if it matches standard extension
         const base = file.name.split('.')[0] || 'main';
         file.name = `${base}.${nextLangObj.ext}`;
 
-        // Replace starter code if unmodified
         if (prevLang && file.content.trim() === prevLang.starterCode.trim()) {
           file.content = nextLangObj.starterCode;
         }
@@ -740,30 +950,25 @@ class CodeSyncApp {
       }
     });
 
-    // Compile & Run button
     document.getElementById('btn-compile-run').addEventListener('click', () => {
       this.handleCompileAndRun();
     });
 
-    // Mode switcher (Editor vs Observer)
     document.querySelectorAll('.mode-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         this.setRoleMode(btn.dataset.role);
       });
     });
 
-    // Banner button to switch back to Editor
     document.getElementById('btn-switch-to-editor')?.addEventListener('click', () => {
       this.setRoleMode('editor');
     });
 
-    // Add file tab button
     document.getElementById('btn-add-file').addEventListener('click', () => {
       const currentLang = document.getElementById('language-select').value || 'cpp';
       this._addNewFileTab(currentLang);
     });
 
-    // Copy Room Invite Link
     document.getElementById('btn-copy-room').addEventListener('click', () => {
       const url = window.location.href;
       navigator.clipboard.writeText(url).then(() => {
@@ -771,32 +976,148 @@ class CodeSyncApp {
       });
     });
 
-    // Open 2nd Tab to Test Multi-User Live Sync
-    document.getElementById('btn-open-twin-tab').addEventListener('click', () => {
-      window.open(window.location.href, '_blank');
-    });
-
-    // Toggle Live Demo Collaborator Bot
-    const botBtn = document.getElementById('btn-demo-peer');
-    botBtn.addEventListener('click', () => {
-      if (!this.collab) return;
-      const active = this.collab.toggleDemoCollaborator(this.activeFileId, () => this.editor?.getModel());
-      botBtn.classList.toggle('active', active);
-      botBtn.querySelector('span').textContent = active ? 'Stop Peer Bot' : 'Simulate Peer';
-      this.showToast(
-        active
-          ? 'Maya Lin (Live Peer) joined with a remote colored cursor!'
-          : 'Simulated peer disconnected.'
-      );
-    });
-
-    // Room / Profile Modal triggers
+    // Room & Profile settings buttons
     document.getElementById('btn-room-settings').addEventListener('click', () => {
+      this.openProfileModal();
+    });
+    document.getElementById('btn-change-room').addEventListener('click', () => {
       this.openProfileModal();
     });
 
     document.getElementById('btn-close-modal').addEventListener('click', () => {
       document.getElementById('profile-modal').classList.add('hidden');
+    });
+    document.getElementById('btn-cancel-profile-modal').addEventListener('click', () => {
+      document.getElementById('profile-modal').classList.add('hidden');
+    });
+
+    document.getElementById('btn-profile-auth-action').addEventListener('click', () => {
+      const isAuthed = this.currentUser.authProvider === 'google' || this.currentUser.authProvider === 'account';
+      if (isAuthed) {
+        this.signOut();
+      } else {
+        document.getElementById('profile-modal').classList.add('hidden');
+        this.openAuthModal('signin');
+      }
+    });
+
+    // Auth Modal triggers
+    document.getElementById('btn-auth-trigger').addEventListener('click', () => {
+      this.openAuthModal('signin');
+    });
+
+    document.getElementById('btn-close-auth-modal').addEventListener('click', () => {
+      document.getElementById('auth-modal').classList.add('hidden');
+    });
+
+    document.querySelectorAll('.auth-tab').forEach((tabBtn) => {
+      tabBtn.addEventListener('click', () => {
+        this._switchAuthTab(tabBtn.dataset.authTab);
+      });
+    });
+
+    // Google Sign-In Flow
+    document.getElementById('btn-google-signin').addEventListener('click', () => {
+      this._toggleGoogleAccountDrawer();
+    });
+
+    document.getElementById('btn-google-custom-submit').addEventListener('click', () => {
+      const nameVal = document.getElementById('google-custom-name').value.trim();
+      const emailVal = document.getElementById('google-custom-email').value.trim().toLowerCase();
+      if (!emailVal || !emailVal.includes('@')) {
+        this.showToast('Please enter a valid Google email address.');
+        return;
+      }
+      const displayName = nameVal || emailVal.split('@')[0];
+      const accounts = this._getStoredAccounts();
+      const existing = accounts.find(a => a.email === emailVal);
+      const colorObj = existing
+        ? (USER_COLORS.find(c => c.hex === existing.color) || USER_COLORS[0])
+        : (USER_COLORS.find(c => c.hex === this.currentUser.color) || USER_COLORS[0]);
+
+      if (!existing) {
+        accounts.push({
+          name: displayName,
+          email: emailVal,
+          color: colorObj.hex,
+          bg: colorObj.bg,
+          authProvider: 'google'
+        });
+        this._saveStoredAccounts(accounts);
+      }
+
+      this._completeSignIn({
+        name: displayName,
+        email: emailVal,
+        color: colorObj.hex,
+        bg: colorObj.bg,
+        authProvider: 'google'
+      });
+    });
+
+    // Email / Password Sign In & Create Account Submit
+    document.getElementById('auth-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const errEl = document.getElementById('auth-error-msg');
+      errEl.classList.add('hidden');
+
+      const email = document.getElementById('auth-email-input').value.trim().toLowerCase();
+      const password = document.getElementById('auth-password-input').value;
+      const accounts = this._getStoredAccounts();
+
+      if (this.authTabMode === 'signup') {
+        const name = document.getElementById('auth-name-input').value.trim() || email.split('@')[0];
+        const modal = document.getElementById('auth-modal');
+        const chosenHex = modal.dataset.selectedHex || this.currentUser.color;
+        const chosenBg = modal.dataset.selectedBg || this.currentUser.bg;
+
+        if (accounts.some(a => a.email === email && a.authProvider === 'account')) {
+          errEl.textContent = 'An account with this email already exists. Please switch to Sign In.';
+          errEl.classList.remove('hidden');
+          return;
+        }
+
+        const newAccount = {
+          name,
+          email,
+          passwordHash: btoa(encodeURIComponent(password)),
+          color: chosenHex,
+          bg: chosenBg,
+          authProvider: 'account',
+          createdAt: Date.now()
+        };
+
+        accounts.push(newAccount);
+        this._saveStoredAccounts(accounts);
+
+        this._completeSignIn({
+          name,
+          email,
+          color: chosenHex,
+          bg: chosenBg,
+          authProvider: 'account'
+        });
+      } else {
+        const found = accounts.find(a => a.email === email);
+        if (!found) {
+          errEl.textContent = 'No account found with that email. Click "Create Account" above to register.';
+          errEl.classList.remove('hidden');
+          return;
+        }
+        if (found.authProvider === 'account' && found.passwordHash !== btoa(encodeURIComponent(password))) {
+          errEl.textContent = 'Incorrect password. Please try again.';
+          errEl.classList.remove('hidden');
+          return;
+        }
+
+        this._completeSignIn({
+          name: found.name,
+          email: found.email,
+          color: found.color,
+          bg: found.bg,
+          authProvider: found.authProvider || 'account'
+        });
+      }
     });
 
     document.getElementById('btn-generate-new-room').addEventListener('click', () => {
@@ -817,6 +1138,17 @@ class CodeSyncApp {
       this.currentUser.bg = newBg;
       sessionStorage.setItem('codesync_tab_user', JSON.stringify(this.currentUser));
 
+      // Also update persisted account if logged in
+      if (this.currentUser.email) {
+        localStorage.setItem('codesync_active_account_v1', JSON.stringify({
+          name: newName,
+          email: this.currentUser.email,
+          color: newHex,
+          bg: newBg,
+          authProvider: this.currentUser.authProvider
+        }));
+      }
+
       modal.classList.add('hidden');
 
       if (newRoom !== this.roomId) {
@@ -829,15 +1161,13 @@ class CodeSyncApp {
         color: newHex,
         bg: newBg
       });
-      this.showToast(`Profile updated (${newName})`);
+      this.showToast(`Settings saved (${newName})`);
     });
 
-    // Stdin input sync
     document.getElementById('stdin-input').addEventListener('input', (e) => {
       this.collab?.sendStdinChange(e.target.value);
     });
 
-    // Clear console output
     document.getElementById('btn-clear-console').addEventListener('click', () => {
       document.getElementById('stdout-output').textContent = '';
       document.getElementById('stderr-output').textContent = '';
@@ -846,14 +1176,12 @@ class CodeSyncApp {
       document.getElementById('exec-metrics').textContent = '';
     });
 
-    // Sidebar toggle
     document.getElementById('btn-toggle-sidebar').addEventListener('click', () => {
       const sb = document.getElementById('collab-sidebar');
       sb.classList.toggle('collapsed');
       setTimeout(() => this.editor?.layout(), 210);
     });
 
-    // Chat form submit
     document.getElementById('chat-form').addEventListener('submit', (e) => {
       e.preventDefault();
       const input = document.getElementById('chat-input');
