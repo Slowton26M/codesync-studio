@@ -911,7 +911,7 @@ class CodeSyncApp {
     document.getElementById('auth-name-input').required = isSignup;
     document.getElementById('btn-auth-submit').textContent = isSignup
       ? 'Create Account & Join Room'
-      : 'Sign In to CodeSync';
+      : 'Sign In to pleaseAC';
     document.getElementById('auth-error-msg').classList.add('hidden');
   }
 
@@ -989,7 +989,7 @@ class CodeSyncApp {
         authProvider: this.currentUser.authProvider
       });
       this.collab.sendChatMessage(
-        `${this.currentUser.name} signed in via ${authProvider === 'google' ? 'Google' : 'CodeSync Account'}`,
+        `${this.currentUser.name} signed in via ${authProvider === 'google' ? 'Google' : 'pleaseAC Account'}`,
         true
       );
     }

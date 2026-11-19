@@ -1,4 +1,4 @@
-# CodeSync Studio — Real-Time Collaborative IDE & Multi-Language Compiler
+# pleaseAC — Real-Time Collaborative IDE & Multi-Language Compiler
 
 A Google Docs-style real-time collaborative code editor and multi-language cloud compiler built for zero-config deployment on **Vercel (`.vercel.app`)**.
 
