@@ -1,5 +1,5 @@
 // Real-Time Collaboration Engine (Google Docs-style Presence, Cursors, Multi-Tab & P2P Sync)
-import { LANGUAGES, USER_COLORS } from './compilers.js';
+import { LANGUAGES } from './compilers.js';
 
 export class RoomCollaborationEngine {
   constructor({
@@ -13,7 +13,7 @@ export class RoomCollaborationEngine {
     onTabChange
   }) {
     this.roomId = roomId.toUpperCase();
-    this.user = user; // { id, name, color, bg, role: 'editor' | 'observer', activeFileId, cursor, selection, isTyping }
+    this.user = user; // { id, name, email, authProvider, color, bg, role: 'editor' | 'observer', activeFileId, cursor, selection, isTyping }
     this.onStateSync = onStateSync;
     this.onRemoteCodeChange = onRemoteCodeChange;
     this.onPresenceUpdate = onPresenceUpdate;
@@ -25,8 +25,6 @@ export class RoomCollaborationEngine {
     this.channel = null;
     this.wsRelay = null;
     this.heartbeatInterval = null;
-    this.demoBotInterval = null;
-    this.demoBotActive = false;
 
     // Shared room document state
     this.state = {
@@ -98,7 +96,7 @@ export class RoomCollaborationEngine {
     };
     window.addEventListener('storage', this._storageListener);
 
-    // 4. Connect to public WebRTC / WebSocket signaling relay for cross-device sync
+    // 4. Connect to public WebSocket signaling relay for cross-device sync
     this._connectPublicRelay();
 
     // 5. Announce presence & start heartbeat
@@ -123,7 +121,6 @@ export class RoomCollaborationEngine {
   }
 
   _connectPublicRelay() {
-    // Uses public HiveMQ / EMQX WebSocket JSON topic relay via ntfy.sh SSE/WS for zero-config serverless room sync across devices
     try {
       const topic = `codesync_v1_room_${this.roomId.replace(/[^A-Z0-9_-]/gi, '')}`;
       const ws = new WebSocket(`wss://ntfy.sh/${topic}/ws`);
@@ -166,26 +163,22 @@ export class RoomCollaborationEngine {
       timestamp: Date.now()
     };
 
-    // Local BroadcastChannel
     if (this.channel) {
       try {
         this.channel.postMessage(payload);
       } catch (_) {}
     }
 
-    // LocalStorage event fallback
     try {
       localStorage.setItem(`codesync_pkt_${this.roomId}`, JSON.stringify(payload));
     } catch (_) {}
 
-    // Cross-device relay for key events (avoid flooding on every single mouse move)
     if (!skipRemoteRelay && packet.type !== 'HEARTBEAT') {
       this._sendToPublicRelay(payload);
     }
   }
 
   _sendToPublicRelay(payload) {
-    // Debounce remote relay posts
     const topic = `codesync_v1_room_${this.roomId.replace(/[^A-Z0-9_-]/gi, '')}`;
     if (payload.type === 'CURSOR_MOVE') {
       const now = Date.now();
@@ -216,7 +209,6 @@ export class RoomCollaborationEngine {
 
     switch (pkt.type) {
       case 'JOIN_REQUEST':
-        // Reply with current room state so newcomer is synced immediately
         this.broadcastPacket({
           type: 'STATE_SNAPSHOT',
           targetId: pkt.senderId,
@@ -334,7 +326,7 @@ export class RoomCollaborationEngine {
   }
 
   sendCodeChange(fileId, content, cursor) {
-    if (this.user.role === 'observer') return; // Observers are read-only
+    if (this.user.role === 'observer') return;
     const file = this.state.files.find(f => f.id === fileId);
     if (file) {
       file.content = content;
@@ -404,84 +396,10 @@ export class RoomCollaborationEngine {
     });
   }
 
-  /**
-   * Built-in Live Collaborator Simulator so single users can test Google-Docs-style
-   * remote cursors, colored carets, selection highlights, and live edits at the click of a button!
-   */
-  toggleDemoCollaborator(activeFileId, getEditorModel) {
-    if (this.demoBotActive) {
-      this.stopDemoCollaborator();
-      return false;
-    }
-
-    this.demoBotActive = true;
-    const botColor = USER_COLORS.find(c => c.hex !== this.user.color) || USER_COLORS[1];
-    const botId = 'peer-maya-bot';
-    const botUser = {
-      id: botId,
-      name: 'Maya Lin (Live Peer)',
-      color: botColor.hex,
-      bg: botColor.bg,
-      role: 'editor',
-      activeFileId: activeFileId,
-      cursor: { lineNumber: 6, column: 1 },
-      selection: null,
-      isTyping: false,
-      isBot: true,
-      lastSeen: Date.now()
-    };
-
-    this.peers.set(botId, botUser);
-    this._emitPresence();
-
-    let step = 0;
-    this.demoBotInterval = setInterval(() => {
-      const model = getEditorModel?.();
-      if (!model) return;
-
-      const lineCount = Math.max(1, model.getLineCount());
-      step++;
-      const targetLine = ((step * 3) % lineCount) + 1;
-      const lineLen = Math.max(1, model.getLineMaxColumn(targetLine));
-      const startCol = Math.min(5, lineLen);
-      const endCol = Math.min(startCol + 14, lineLen);
-
-      const bot = this.peers.get(botId);
-      if (!bot) return;
-
-      bot.activeFileId = this.user.activeFileId;
-      bot.cursor = { lineNumber: targetLine, column: endCol };
-      bot.selection = endCol > startCol ? {
-        startLineNumber: targetLine,
-        startColumn: startCol,
-        endLineNumber: targetLine,
-        endColumn: endCol
-      } : null;
-      bot.isTyping = step % 2 === 0;
-      bot.lastSeen = Date.now();
-
-      this.peers.set(botId, bot);
-      this._emitPresence();
-    }, 1600);
-
-    return true;
-  }
-
-  stopDemoCollaborator() {
-    this.demoBotActive = false;
-    if (this.demoBotInterval) {
-      clearInterval(this.demoBotInterval);
-      this.demoBotInterval = null;
-    }
-    this.peers.delete('peer-maya-bot');
-    this._emitPresence();
-  }
-
   _pruneStalePeers() {
     const now = Date.now();
     let changed = false;
     for (const [id, peer] of this.peers.entries()) {
-      if (peer.isBot) continue;
       if (now - (peer.lastSeen || 0) > 8500) {
         this.peers.delete(id);
         changed = true;
@@ -501,7 +419,6 @@ export class RoomCollaborationEngine {
   }
 
   destroy() {
-    this.stopDemoCollaborator();
     if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
     this.broadcastPacket({ type: 'USER_LEAVE' });
     if (this.channel) this.channel.close();
