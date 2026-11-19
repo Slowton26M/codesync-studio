@@ -79,6 +79,75 @@
           <span>Compile &amp; Run</span>
           <span class="kbd-hint">Ctrl+↵</span>
         </button>
+
+        <!-- Study Mode Header Widget (Normal Stopwatch & 60m/5m Pomodoro) -->
+        <div class="study-mode-wrapper" id="study-mode-wrapper">
+          <div class="study-pill" id="study-pill-trigger" title="Open Study Mode Controls (Normal Timer & 60m/5m Pomodoro)">
+            <span class="study-dot" id="study-status-dot"></span>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+            <span class="study-mode-badge" id="study-mode-label">Study</span>
+            <span class="study-timer-text" id="study-timer-display">00:00:00</span>
+          </div>
+          <button type="button" class="study-quick-btn" id="btn-study-quick-toggle" title="Start / Pause Study Timer">
+            ▶
+          </button>
+
+          <!-- Study Mode Dropdown Popover -->
+          <div class="study-popover hidden" id="study-popover">
+            <div class="study-popover-header">
+              <div>
+                <div class="study-popover-title">Study Mode</div>
+                <div class="study-popover-sub" id="study-phase-subtitle">Track working time or use 60m/5m Pomodoro</div>
+              </div>
+              <button type="button" class="btn-modal-x" id="btn-close-study-popover" aria-label="Close">&times;</button>
+            </div>
+
+            <!-- Mode Switcher: Normal vs Pomodoro (60m Work / 5m Break) -->
+            <div class="study-type-tabs" role="tablist">
+              <button type="button" class="study-type-tab active" data-study-type="normal" id="tab-study-normal">
+                Normal Timer
+              </button>
+              <button type="button" class="study-type-tab" data-study-type="pomodoro" id="tab-study-pomodoro">
+                Pomodoro (60m / 5m)
+              </button>
+            </div>
+
+            <!-- Large Timer Readout -->
+            <div class="study-clock-card" id="study-clock-card">
+              <div class="study-phase-tag" id="study-phase-tag">WORKING TIME</div>
+              <div class="study-big-digits" id="study-big-digits">00:00:00</div>
+              <div class="study-total-meta" id="study-total-worked">Session total: 0m worked</div>
+            </div>
+
+            <!-- Timer Controls -->
+            <div class="study-controls-row">
+              <button type="button" class="btn-study-primary" id="btn-study-start-pause">
+                Start Timer
+              </button>
+              <button type="button" class="btn-study-secondary" id="btn-study-reset" title="Reset current timer">
+                Reset
+              </button>
+            </div>
+
+            <!-- Pomodoro Specific Actions (Visible in Pomodoro Mode) -->
+            <div class="study-pomo-actions hidden" id="study-pomo-actions">
+              <div class="study-pomo-info">
+                <span>🔔 Alerts you to take a <strong>5-minute break</strong> after <strong>1 hour (60m)</strong> of working.</span>
+              </div>
+              <div style="display:flex;gap:6px;margin-top:8px">
+                <button type="button" class="btn-icon-pill" id="btn-study-skip-phase" style="flex:1;justify-content:center">
+                  Switch Work / 5m Break
+                </button>
+                <button type="button" class="btn-icon-pill" id="btn-study-test-alert" style="justify-content:center" title="Preview the 1-hour Pomodoro break alert">
+                  Test Alert
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- Right Presence Stack, Auth Button & Sidebar Toggle -->
@@ -127,15 +196,20 @@
           </button>
         </div>
 
-        <!-- Monaco Editor + Live Remote Cursor Overlay + Bottom Compiler Console -->
-        <div class="editor-console-split">
-          <div class="monaco-mount-wrap">
+        <!-- Monaco Editor + Live Remote Cursor Overlay + Resizable Bottom Compiler Console -->
+        <div class="editor-console-split" id="editor-console-split">
+          <div class="monaco-mount-wrap" id="monaco-mount-wrap">
             <div id="monaco-editor-container"></div>
             <div id="remote-cursor-overlay" class="remote-cursor-overlay"></div>
           </div>
 
+          <!-- Horizontal Drag Resizer (Editor <-> Compiler Console) -->
+          <div class="pane-resizer-h" id="resizer-terminal" title="Drag to resize Compiler Output & Stdin panel">
+            <div class="resizer-grip-h"></div>
+          </div>
+
           <!-- Compiler Stdin / Stdout Terminal Drawer -->
-          <div class="terminal-drawer">
+          <div class="terminal-drawer" id="terminal-drawer">
             <div class="terminal-header">
               <div class="terminal-title-cluster">
                 <div class="terminal-tab-title">
@@ -145,6 +219,7 @@
                   </svg>
                   <span>Compiler Output &amp; Stdin</span>
                 </div>
+                <span class="terminal-file-pill" id="terminal-active-file-badge">main.cpp</span>
                 <span class="exec-status-badge idle" id="exec-status-badge">Ready</span>
                 <div class="exec-metrics" id="exec-metrics"></div>
               </div>
@@ -154,12 +229,12 @@
               </div>
             </div>
 
-            <div class="terminal-body-grid">
+            <div class="terminal-body-grid" id="terminal-body-grid">
               <!-- Custom Standard Input (stdin) -->
-              <div class="stdin-pane">
+              <div class="stdin-pane" id="stdin-pane">
                 <div class="pane-sub-header">
                   <span>Standard Input (stdin)</span>
-                  <span style="font-family:var(--font-mono);font-size:10px;color:var(--accent-primary)">Synced</span>
+                  <span style="font-family:var(--font-mono);font-size:10px;color:var(--accent-primary)">Per-Tab Sync</span>
                 </div>
                 <textarea
                   id="stdin-input"
@@ -169,8 +244,13 @@
                 >CodeSyncer</textarea>
               </div>
 
+              <!-- Vertical Drag Resizer (Stdin <-> Stdout) -->
+              <div class="pane-resizer-v inner-resizer" id="resizer-stdin" title="Drag to resize Standard Input width">
+                <div class="resizer-grip-v"></div>
+              </div>
+
               <!-- Standard Output & Compiler Diagnostics -->
-              <div class="stdout-pane">
+              <div class="stdout-pane" id="stdout-pane">
                 <pre id="stdout-output" class="output-pre">Click "Compile & Run" (or press Ctrl+Enter) to compile C++, Python, JavaScript, TypeScript, Java, Rust, Go, or C in real time.</pre>
                 <pre id="stderr-output" class="output-pre stderr"></pre>
                 <div id="output-meta-footer" class="output-meta-footer">Multi-language cloud compiler ready.</div>
@@ -180,9 +260,14 @@
         </div>
       </section>
 
+      <!-- Vertical Drag Resizer (Editor Column <-> Collaborators & Chat Sidebar) -->
+      <div class="pane-resizer-v" id="resizer-sidebar" title="Drag to resize Collaborators & Chat sidebar">
+        <div class="resizer-grip-v"></div>
+      </div>
+
       <!-- Right Sidebar: Active Collaborators (with Colors & Roles) + Room Chat -->
       <aside class="collab-sidebar" id="collab-sidebar">
-        <div class="sidebar-section">
+        <div class="sidebar-section" id="collab-peers-section">
           <div class="sidebar-heading">
             <span>Room Collaborators</span>
             <span id="participants-count" style="color:var(--accent-emerald)">1 Online</span>
@@ -190,7 +275,12 @@
           <div class="participants-list" id="participants-list"></div>
         </div>
 
-        <div class="chat-section">
+        <!-- Horizontal Drag Resizer (Room Collaborators <-> Live Room Chat) -->
+        <div class="pane-resizer-h sidebar-inner-resizer" id="resizer-collab-chat" title="Drag to resize Collaborators vs Chat height">
+          <div class="resizer-grip-h"></div>
+        </div>
+
+        <div class="chat-section" id="collab-chat-section">
           <div class="sidebar-heading">
             <span>Live Room Chat</span>
             <span style="font-size:10.5px;text-transform:none;font-weight:500">Real-Time</span>
@@ -245,30 +335,36 @@
         <span>Continue with Google</span>
       </button>
 
-      <!-- Interactive Google Account Picker Drawer (Zero-config Google OAuth simulation & custom Gmail login) -->
+      <!-- Interactive Google Sign-In Drawer -->
       <div class="google-picker-drawer hidden" id="google-picker-drawer">
         <div class="google-picker-header">
-          <span>Choose a Google Account to continue to <strong>CodeSync Studio</strong></span>
+          <span>Sign in with your Google Account to <strong>CodeSync Studio</strong></span>
         </div>
-        <div class="google-accounts-list" id="google-accounts-list"></div>
         <div class="google-custom-row">
           <input
             type="text"
             id="google-custom-name"
             class="form-input"
-            placeholder="Your Name (e.g. Minh Huynh)"
+            placeholder="Your Display Name (optional for existing accounts)"
+            style="margin-bottom:6px;padding:8px 10px;font-size:12.5px"
+          />
+          <input
+            type="email"
+            id="google-custom-email"
+            class="form-input"
+            placeholder="your.email@gmail.com"
             style="margin-bottom:6px;padding:8px 10px;font-size:12.5px"
           />
           <div style="display:flex;gap:6px">
             <input
-              type="email"
-              id="google-custom-email"
+              type="password"
+              id="google-custom-password"
               class="form-input"
-              placeholder="your.email@gmail.com"
+              placeholder="Account Password (min 4 chars)"
               style="padding:8px 10px;font-size:12.5px"
             />
             <button type="button" class="btn-google-confirm" id="btn-google-custom-submit">
-              Continue
+              Sign In
             </button>
           </div>
         </div>
@@ -391,9 +487,75 @@
     </div>
   </div>
 
+  <!-- Create / Rename Code File Tab Modal -->
+  <div class="modal-backdrop hidden" id="file-tab-modal">
+    <div class="modal-card" style="max-width:420px">
+      <div class="auth-header-row">
+        <div>
+          <h2 class="modal-title" id="file-tab-modal-title">Create New Code Tab</h2>
+          <p class="modal-subtitle" id="file-tab-modal-subtitle">
+            Enter a filename for this tab. Each tab has its own isolated Standard Input and Compiler Output.
+          </p>
+        </div>
+        <button type="button" class="btn-modal-x" id="btn-close-file-tab-modal" aria-label="Close">&times;</button>
+      </div>
+
+      <form id="file-tab-form">
+        <div class="form-group">
+          <label class="form-label" for="file-tab-name-input">File Name</label>
+          <input
+            type="text"
+            id="file-tab-name-input"
+            class="form-input"
+            placeholder="e.g. problem_a.cpp or helper.py"
+            maxlength="48"
+            required
+          />
+        </div>
+
+        <div class="form-group" id="file-tab-lang-group">
+          <label class="form-label" for="file-tab-lang-select">Language</label>
+          <select id="file-tab-lang-select" class="form-input" style="cursor:pointer"></select>
+        </div>
+
+        <div class="auth-error-msg hidden" id="file-tab-error-msg"></div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary-lg" id="btn-cancel-file-tab-modal">Cancel</button>
+          <button type="submit" class="btn-primary-lg" id="btn-file-tab-submit">Create Tab</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Pomodoro 1-Hour Complete / 5-Minute Break Alert Modal -->
+  <div class="modal-backdrop hidden" id="pomodoro-break-modal">
+    <div class="modal-card pomo-alert-card">
+      <div class="pomo-alert-icon">☕</div>
+      <h2 class="modal-title" id="pomo-alert-title">Time for a 5-Minute Break!</h2>
+      <p class="modal-subtitle" id="pomo-alert-message">
+        You've been working for <strong>1 full hour (60 minutes)</strong> in Study Mode. Step back, stretch, and rest your eyes for 5 minutes!
+      </p>
+      <div class="pomo-break-countdown-box">
+        <span class="pomo-break-label">BREAK TIMER</span>
+        <span class="pomo-break-digits" id="pomo-modal-countdown">05:00</span>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn-secondary-lg" id="btn-pomo-skip-break">
+          Skip Break &amp; Work
+        </button>
+        <button type="button" class="btn-primary-lg" id="btn-pomo-start-break" style="background:linear-gradient(135deg,#10b981 0%,#059669 100%)">
+          Start 5-Min Break
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Toast Container -->
   <div class="toast-container" id="toast-container"></div>
 
+  <!-- MQTT over WebSockets Client for Instant Cross-Device Real-Time Sync -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.10.1/mqtt.min.js"></script>
   <!-- Monaco Editor AMD Loader -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.47.0/min/vs/loader.min.js"></script>
   <script type="module" src="/js/app.js"></script>

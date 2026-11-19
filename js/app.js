@@ -25,21 +25,41 @@ class CodeSyncApp {
     this.allUsers = [];
     this.authTabMode = 'signin'; // 'signin' | 'signup'
 
+    // Study Mode State (Normal Stopwatch vs 60m Work / 5m Break Pomodoro)
+    this.studyState = {
+      mode: 'normal',         // 'normal' | 'pomodoro'
+      pomoPhase: 'work',      // 'work' (60m = 3600s) | 'break' (5m = 300s)
+      isRunning: false,
+      normalSeconds: 0,       // Stopwatch elapsed seconds
+      pomoRemainingSec: 3600, // 60 minutes default
+      totalWorkedSec: 0,      // Cumulative working time
+      intervalId: null
+    };
+
     this._initIdentityAndRoom();
+    this._initStudyMode();
     this._bindDOMEvents();
+    this._initResizablePanes();
     this._updateAuthHeaderUI();
     this._loadMonacoEditor();
   }
 
   _initIdentityAndRoom() {
     const params = new URLSearchParams(window.location.search);
-    let roomParam = params.get('room');
+    const pathMatch = window.location.pathname.match(/\/room\/([A-Za-z0-9_-]+)/i);
+    const hashMatch = window.location.hash.replace(/^#/, '').trim();
+    let roomParam = params.get('room') || (pathMatch ? pathMatch[1] : null) || (hashMatch || null);
     if (!roomParam) {
       roomParam = 'SYNC-' + Math.random().toString(36).substring(2, 6).toUpperCase();
-      const newUrl = `${window.location.pathname}?room=${roomParam}`;
-      window.history.replaceState({}, '', newUrl);
     }
     this.roomId = roomParam.toUpperCase();
+    const canonicalUrl = `/?room=${encodeURIComponent(this.roomId)}`;
+    if (window.location.pathname + window.location.search !== canonicalUrl) {
+      window.history.replaceState({}, '', canonicalUrl);
+    }
+
+    // Always generate a unique runtime peer ID per tab/window instance so duplicated tabs never collide
+    const runtimePeerId = 'usr-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 8);
 
     // 1. Check if user has an active authenticated session (Google or CodeSync Account)
     let activeAccount = null;
@@ -53,10 +73,10 @@ class CodeSyncApp {
       savedUser = JSON.parse(sessionStorage.getItem('codesync_tab_user'));
     } catch (_) {}
 
-    if (activeAccount && activeAccount.email) {
+    if (activeAccount && activeAccount.email && activeAccount.authenticated === true) {
       const colorObj = USER_COLORS.find(c => c.hex === activeAccount.color) || USER_COLORS[0];
       savedUser = {
-        id: savedUser?.id || ('usr-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 6)),
+        id: runtimePeerId,
         name: activeAccount.name,
         email: activeAccount.email,
         authProvider: activeAccount.authProvider || 'account', // 'google' | 'account'
@@ -74,7 +94,7 @@ class CodeSyncApp {
       const colorObj = USER_COLORS[tabIndex];
       const personaName = DEFAULT_PERSONAS[tabIndex % DEFAULT_PERSONAS.length];
       savedUser = {
-        id: 'usr-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 6),
+        id: runtimePeerId,
         name: personaName,
         email: null,
         authProvider: 'guest',
@@ -87,6 +107,8 @@ class CodeSyncApp {
         isTyping: false
       };
       sessionStorage.setItem('codesync_tab_user', JSON.stringify(savedUser));
+    } else {
+      savedUser.id = runtimePeerId;
     }
 
     this.currentUser = savedUser;
@@ -232,16 +254,17 @@ class CodeSyncApp {
         if (!state.files.some(f => f.id === this.activeFileId)) {
           this.activeFileId = state.files[0].id;
         }
-        document.getElementById('stdin-input').value = state.stdin || '';
         this._renderFileTabs();
         this._syncEditorToActiveFile();
         this._renderAllChatMessages(state.chat);
       },
       onRemoteCodeChange: (pkt) => {
         if (pkt.type === 'STDIN_EDIT') {
-          const stdinEl = document.getElementById('stdin-input');
-          if (document.activeElement !== stdinEl) {
-            stdinEl.value = pkt.stdin;
+          if (!pkt.fileId || pkt.fileId === this.activeFileId) {
+            const stdinEl = document.getElementById('stdin-input');
+            if (document.activeElement !== stdinEl) {
+              stdinEl.value = pkt.stdin;
+            }
           }
           return;
         }
@@ -277,8 +300,11 @@ class CodeSyncApp {
       onChatMessage: (msg) => {
         this._appendChatMessage(msg);
       },
-      onRemoteExecution: (execResult) => {
-        this._displayExecutionOutput(execResult, true);
+      onRemoteExecution: (execResult, fileId) => {
+        const targetId = fileId || execResult?.fileId;
+        if (!targetId || targetId === this.activeFileId) {
+          this._displayExecutionOutput(execResult, true);
+        }
       },
       onTabChange: (files) => {
         if (!files.some(f => f.id === this.activeFileId)) {
@@ -313,7 +339,47 @@ class CodeSyncApp {
     }
     this.isApplyingRemoteEdit = false;
 
+    // Sync per-tab isolated Stdin & Compiler Output
+    const termBadge = document.getElementById('terminal-active-file-badge');
+    if (termBadge) termBadge.textContent = file.name;
+
+    const stdinEl = document.getElementById('stdin-input');
+    if (stdinEl && document.activeElement !== stdinEl) {
+      stdinEl.value = file.stdin !== undefined ? file.stdin : '';
+    }
+
+    if (file.lastExecution) {
+      this._displayExecutionOutput(file.lastExecution, false);
+    } else {
+      this._resetConsoleUI(file.name);
+    }
+
     this._renderRemoteCursorsInEditor();
+  }
+
+  _resetConsoleUI(fileName = '') {
+    const statusBadge = document.getElementById('exec-status-badge');
+    const stdoutEl = document.getElementById('stdout-output');
+    const stderrEl = document.getElementById('stderr-output');
+    const metricsEl = document.getElementById('exec-metrics');
+    const metaFooter = document.getElementById('output-meta-footer');
+
+    if (statusBadge) {
+      statusBadge.className = 'exec-status-badge idle';
+      statusBadge.textContent = 'Ready';
+    }
+    if (stdoutEl) {
+      stdoutEl.textContent = fileName
+        ? `Ready to compile & run ${fileName} (Press Ctrl+Enter). Input and output are isolated to this tab.`
+        : 'Click "Compile & Run" (or press Ctrl+Enter) to compile in real time.';
+    }
+    if (stderrEl) stderrEl.textContent = '';
+    if (metricsEl) metricsEl.textContent = '';
+    if (metaFooter) {
+      metaFooter.textContent = fileName
+        ? `Isolated console for ${fileName} — won't interfere with other tabs.`
+        : 'Multi-language cloud compiler ready.';
+    }
   }
 
   switchFileTab(fileId, fromFollow = false) {
@@ -349,16 +415,26 @@ class CodeSyncApp {
 
       const tab = document.createElement('button');
       tab.className = `file-tab ${isActive ? 'active' : ''}`;
+      tab.title = this.currentUser.role === 'editor'
+        ? `${file.name} (Double-click to rename)`
+        : file.name;
       tab.innerHTML = `
         <span class="file-lang-dot" style="background:${lang.color}"></span>
         <span>${this._escapeHtml(file.name)}</span>
         <span class="file-tab-peers">
           ${peersOnFile.map(p => `<span class="file-peer-pip" style="background:${p.color}" title="${this._escapeHtml(p.name)}"></span>`).join('')}
         </span>
+        ${this.currentUser.role === 'editor' ? `<span class="file-tab-rename" data-rename-id="${file.id}" title="Rename tab">✎</span>` : ''}
         ${files.length > 1 && this.currentUser.role === 'editor' ? `<span class="file-tab-close" data-close-id="${file.id}" title="Close file">&times;</span>` : ''}
       `;
 
       tab.addEventListener('click', (e) => {
+        const renameId = e.target.getAttribute('data-rename-id');
+        if (renameId) {
+          e.stopPropagation();
+          this.openFileTabModal('rename', renameId);
+          return;
+        }
         const closeId = e.target.getAttribute('data-close-id');
         if (closeId) {
           e.stopPropagation();
@@ -368,23 +444,88 @@ class CodeSyncApp {
         this.switchFileTab(file.id);
       });
 
+      tab.addEventListener('dblclick', (e) => {
+        if (this.currentUser.role !== 'editor') return;
+        if (e.target.getAttribute('data-close-id')) return;
+        this.openFileTabModal('rename', file.id);
+      });
+
       listEl.appendChild(tab);
     });
   }
 
-  _addNewFileTab(langId = 'cpp') {
+  openFileTabModal(mode = 'create', targetFileId = null) {
+    if (this.currentUser.role === 'observer') {
+      this.showToast('Switch to Editor mode to create or rename files.');
+      return;
+    }
+
+    const modal = document.getElementById('file-tab-modal');
+    const titleEl = document.getElementById('file-tab-modal-title');
+    const subtitleEl = document.getElementById('file-tab-modal-subtitle');
+    const nameInput = document.getElementById('file-tab-name-input');
+    const langGroup = document.getElementById('file-tab-lang-group');
+    const langSelect = document.getElementById('file-tab-lang-select');
+    const submitBtn = document.getElementById('btn-file-tab-submit');
+    const errEl = document.getElementById('file-tab-error-msg');
+
+    errEl.classList.add('hidden');
+    modal.dataset.mode = mode;
+    modal.dataset.targetFileId = targetFileId || '';
+
+    langSelect.innerHTML = Object.values(LANGUAGES)
+      .map(l => `<option value="${l.id}">${l.name} (.${l.ext})</option>`)
+      .join('');
+
+    if (mode === 'rename' && targetFileId) {
+      const targetFile = this.collab.state.files.find(f => f.id === targetFileId);
+      if (!targetFile) return;
+      titleEl.textContent = 'Rename Code Tab';
+      subtitleEl.textContent = 'Update the filename for this tab across all collaborators in the room.';
+      nameInput.value = targetFile.name;
+      langSelect.value = targetFile.language;
+      langGroup.classList.add('hidden');
+      submitBtn.textContent = 'Save Name';
+    } else {
+      const currentLang = document.getElementById('language-select').value || 'cpp';
+      const langObj = LANGUAGES[currentLang] || LANGUAGES.cpp;
+      const count = this.collab.state.files.filter(f => f.language === currentLang).length + 1;
+      const suggestedName = langObj.defaultFileName.replace('.', count > 1 ? `_${count}.` : '.');
+
+      titleEl.textContent = 'Create New Code Tab';
+      subtitleEl.textContent = 'Name your file before creating it. Each tab has its own isolated Standard Input and Compiler Output.';
+      nameInput.value = suggestedName;
+      langSelect.value = currentLang;
+      langGroup.classList.remove('hidden');
+      submitBtn.textContent = 'Create Tab';
+    }
+
+    modal.classList.remove('hidden');
+    nameInput.focus();
+    nameInput.select();
+  }
+
+  _addNewFileTab(langId = 'cpp', customName = '') {
     if (this.currentUser.role === 'observer') {
       this.showToast('Switch to Editor mode to create new files.');
       return;
     }
     const lang = LANGUAGES[langId] || LANGUAGES.cpp;
-    const count = this.collab.state.files.filter(f => f.language === langId).length + 1;
-    const baseName = lang.defaultFileName.replace('.', count > 1 ? `_${count}.` : '.');
+    let fileName = (customName || '').trim();
+    if (!fileName) {
+      const count = this.collab.state.files.filter(f => f.language === langId).length + 1;
+      fileName = lang.defaultFileName.replace('.', count > 1 ? `_${count}.` : '.');
+    } else if (!fileName.includes('.')) {
+      fileName = `${fileName}.${lang.ext}`;
+    }
+
     const newFile = {
-      id: 'file-' + Date.now().toString(36),
-      name: baseName,
+      id: 'file-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 5),
+      name: fileName,
       language: langId,
       content: lang.starterCode,
+      stdin: '',
+      lastExecution: null,
       updatedBy: this.currentUser.name,
       updatedAt: Date.now()
     };
@@ -395,6 +536,38 @@ class CodeSyncApp {
     this._renderFileTabs();
     this._syncEditorToActiveFile();
     this.collab.sendChatMessage(`${this.currentUser.name} created ${newFile.name}`, true);
+  }
+
+  _renameFileTab(fileId, newNameRaw) {
+    const file = this.collab.state.files.find(f => f.id === fileId);
+    if (!file) return;
+    const oldName = file.name;
+    let newName = newNameRaw.trim();
+    if (!newName) return;
+
+    const currentLang = LANGUAGES[file.language] || LANGUAGES.cpp;
+    if (!newName.includes('.')) {
+      newName = `${newName}.${currentLang.ext}`;
+    } else {
+      // Auto-detect language if user typed a known extension
+      const ext = newName.split('.').pop().toLowerCase();
+      const matchedLang = Object.values(LANGUAGES).find(l => l.ext === ext);
+      if (matchedLang) {
+        file.language = matchedLang.id;
+      }
+    }
+
+    file.name = newName;
+    file.updatedBy = this.currentUser.name;
+    file.updatedAt = Date.now();
+
+    this.collab.updateFilesList(this.collab.state.files, this.activeFileId);
+    this._renderFileTabs();
+    this._syncEditorToActiveFile();
+    if (oldName !== newName) {
+      this.collab.sendChatMessage(`${this.currentUser.name} renamed ${oldName} → ${newName}`, true);
+      this.showToast(`Renamed tab to ${newName}`);
+    }
   }
 
   _deleteFileTab(fileId) {
@@ -487,10 +660,12 @@ class CodeSyncApp {
   }
 
   _renderPresenceUI(users) {
+    // Top bar: ONLY render the local user's circle/pill so the navbar never crowds with other peers
     const stackEl = document.getElementById('presence-avatar-stack');
     stackEl.innerHTML = '';
 
-    users.forEach((u) => {
+    const selfUsers = users.filter(u => u.isSelf);
+    selfUsers.forEach((u) => {
       const initials = u.name
         .split(' ')
         .map(w => w[0])
@@ -499,24 +674,18 @@ class CodeSyncApp {
         .toUpperCase();
 
       const pill = document.createElement('div');
-      pill.className = `presence-avatar ${this.followingUserId === u.id ? 'following' : ''}`;
+      pill.className = 'presence-avatar';
       pill.style.setProperty('--user-color', u.color);
-      pill.title = u.isSelf
-        ? `${u.name} (You — click to customize color or switch room)`
-        : `Click to follow ${u.name} (${u.role === 'observer' ? 'Observing' : 'Editing'})`;
+      pill.title = `${u.name} (You — click to customize profile, color, or switch room)`;
 
       pill.innerHTML = `
         <span class="avatar-circle" style="background:${u.color}">${this._escapeHtml(initials)}</span>
-        <span>${this._escapeHtml(u.name.split(' ')[0])}${u.isSelf ? ' (You)' : ''}</span>
+        <span>${this._escapeHtml(u.name.split(' ')[0])} (You)</span>
         <span class="avatar-role-tag">${u.role === 'observer' ? 'Observing' : 'Editing'}</span>
       `;
 
       pill.addEventListener('click', () => {
-        if (u.isSelf) {
-          this.openProfileModal();
-        } else {
-          this._toggleFollowUser(u);
-        }
+        this.openProfileModal();
       });
 
       stackEl.appendChild(pill);
@@ -538,7 +707,13 @@ class CodeSyncApp {
         : (u.authProvider === 'account' ? '<span title="Registered Account" style="color:#10b981;font-size:11px;margin-left:4px">✓</span>' : '');
 
       const card = document.createElement('div');
-      card.className = 'participant-card';
+      card.className = `participant-card ${this.followingUserId === u.id ? 'following' : ''}`;
+      card.title = u.isSelf
+        ? 'Click to open your profile & room settings'
+        : `Click to follow ${u.name}'s cursor & active tab`;
+      const studyTag = u.studyStatus
+        ? `<span style="color:#a5b4fc;font-size:10.5px;display:block;margin-top:2px">${this._escapeHtml(u.studyStatus)}</span>`
+        : '';
       card.innerHTML = `
         <div class="participant-info">
           <div class="participant-swatch" style="background:${u.color}">
@@ -550,6 +725,7 @@ class CodeSyncApp {
             </div>
             <div class="participant-cursor-loc">
               ${this._escapeHtml(fileName)} : Ln ${lineNum} ${u.isTyping ? '• typing...' : ''}
+              ${studyTag}
             </div>
           </div>
         </div>
@@ -557,6 +733,13 @@ class CodeSyncApp {
           ${u.role === 'observer' ? 'Observing' : 'Editing'}
         </span>
       `;
+      card.addEventListener('click', () => {
+        if (u.isSelf) {
+          this.openProfileModal();
+        } else {
+          this._toggleFollowUser(u);
+        }
+      });
       listEl.appendChild(card);
     });
   }
@@ -628,6 +811,7 @@ class CodeSyncApp {
     const result = await compileAndRunCode(langId, code, stdin);
     const enrichedResult = {
       ...result,
+      fileId: file.id,
       fileName: file.name,
       languageName: LANGUAGES[langId]?.name || langId,
       triggeredBy: this.currentUser.name,
@@ -635,8 +819,10 @@ class CodeSyncApp {
     };
 
     runBtn.disabled = false;
-    this._displayExecutionOutput(enrichedResult, false);
-    this.collab.broadcastExecutionResult(enrichedResult);
+    this.collab.broadcastExecutionResult(file.id, enrichedResult);
+    if (this.activeFileId === file.id) {
+      this._displayExecutionOutput(enrichedResult, false);
+    }
   }
 
   _displayExecutionOutput(res, isRemote = false) {
@@ -701,6 +887,13 @@ class CodeSyncApp {
     const modal = document.getElementById('auth-modal');
     document.getElementById('google-picker-drawer').classList.add('hidden');
     document.getElementById('auth-error-msg').classList.add('hidden');
+    // Always clear form fields so previous credentials or emails are never exposed
+    const emailInput = document.getElementById('auth-email-input');
+    const passInput = document.getElementById('auth-password-input');
+    const nameInput = document.getElementById('auth-name-input');
+    if (emailInput) emailInput.value = '';
+    if (passInput) passInput.value = '';
+    if (nameInput) nameInput.value = '';
     this._switchAuthTab(defaultTab);
     this._renderAuthColorSwatches();
     modal.classList.remove('hidden');
@@ -750,7 +943,9 @@ class CodeSyncApp {
 
   _getStoredAccounts() {
     try {
-      return JSON.parse(localStorage.getItem('codesync_accounts_v1')) || [];
+      const raw = JSON.parse(localStorage.getItem('codesync_accounts_v1')) || [];
+      // Only retain accounts that have a valid passwordHash (purges any legacy passwordless accounts)
+      return raw.filter(a => a && a.email && a.passwordHash);
     } catch (_) {
       return [];
     }
@@ -769,7 +964,8 @@ class CodeSyncApp {
       email: email.toLowerCase(),
       color: colorObj.hex,
       bg: bg || colorObj.bg,
-      authProvider // 'google' | 'account'
+      authProvider, // 'google' | 'account'
+      authenticated: true
     };
 
     localStorage.setItem('codesync_active_account_v1', JSON.stringify(activeAccount));
@@ -830,49 +1026,16 @@ class CodeSyncApp {
       return;
     }
 
-    const listEl = document.getElementById('google-accounts-list');
-    listEl.innerHTML = '';
-
-    // Suggest saved accounts or quick Google account presets
-    const existingAccounts = this._getStoredAccounts().filter(a => a.authProvider === 'google');
-    const defaultGooglePresets = existingAccounts.length > 0 ? existingAccounts : [
-      {
-        name: 'Minh Huynh',
-        email: 'useforcoding123@gmail.com',
-        color: '#6366f1',
-        bg: 'rgba(99, 102, 241, 0.22)'
-      }
-    ];
-
-    defaultGooglePresets.forEach((acc) => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'google-account-option';
-      btn.innerHTML = `
-        <div style="display:flex;align-items:center;gap:9px">
-          <span class="participant-swatch" style="background:${acc.color || '#4285F4'};width:28px;height:28px">
-            ${this._escapeHtml(acc.name.charAt(0).toUpperCase())}
-          </span>
-          <div>
-            <div style="font-size:12.5px;font-weight:600;color:var(--text-primary)">${this._escapeHtml(acc.name)}</div>
-            <div style="font-size:11px;color:var(--text-secondary)">${this._escapeHtml(acc.email)}</div>
-          </div>
-        </div>
-        <span style="font-size:11px;color:#60a5fa;font-weight:600">Continue →</span>
-      `;
-      btn.addEventListener('click', () => {
-        this._completeSignIn({
-          name: acc.name,
-          email: acc.email,
-          color: acc.color || '#6366f1',
-          bg: acc.bg || 'rgba(99, 102, 241, 0.22)',
-          authProvider: 'google'
-        });
-      });
-      listEl.appendChild(btn);
-    });
+    // Clear all Google sign-in inputs so no account is ever pre-filled or exposed
+    const gName = document.getElementById('google-custom-name');
+    const gEmail = document.getElementById('google-custom-email');
+    const gPass = document.getElementById('google-custom-password');
+    if (gName) gName.value = '';
+    if (gEmail) gEmail.value = '';
+    if (gPass) gPass.value = '';
 
     drawer.classList.remove('hidden');
+    if (gEmail) gEmail.focus();
   }
 
   openProfileModal() {
@@ -965,8 +1128,47 @@ class CodeSyncApp {
     });
 
     document.getElementById('btn-add-file').addEventListener('click', () => {
-      const currentLang = document.getElementById('language-select').value || 'cpp';
-      this._addNewFileTab(currentLang);
+      this.openFileTabModal('create');
+    });
+
+    // File Tab Create / Rename Modal Events
+    const closeFileModal = () => document.getElementById('file-tab-modal').classList.add('hidden');
+    document.getElementById('btn-close-file-tab-modal').addEventListener('click', closeFileModal);
+    document.getElementById('btn-cancel-file-tab-modal').addEventListener('click', closeFileModal);
+
+    document.getElementById('file-tab-lang-select').addEventListener('change', (e) => {
+      const modal = document.getElementById('file-tab-modal');
+      if (modal.dataset.mode !== 'create') return;
+      const langObj = LANGUAGES[e.target.value];
+      const nameInput = document.getElementById('file-tab-name-input');
+      if (langObj && nameInput) {
+        const currentVal = nameInput.value.trim();
+        const base = currentVal ? currentVal.split('.')[0] : langObj.defaultFileName.split('.')[0];
+        nameInput.value = `${base}.${langObj.ext}`;
+      }
+    });
+
+    document.getElementById('file-tab-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const modal = document.getElementById('file-tab-modal');
+      const errEl = document.getElementById('file-tab-error-msg');
+      errEl.classList.add('hidden');
+
+      const rawName = document.getElementById('file-tab-name-input').value.trim();
+      if (!rawName) {
+        errEl.textContent = 'Please enter a valid file name.';
+        errEl.classList.remove('hidden');
+        return;
+      }
+
+      if (modal.dataset.mode === 'rename' && modal.dataset.targetFileId) {
+        this._renameFileTab(modal.dataset.targetFileId, rawName);
+      } else {
+        const langId = document.getElementById('file-tab-lang-select').value || 'cpp';
+        this._addNewFileTab(langId, rawName);
+      }
+
+      modal.classList.add('hidden');
     });
 
     document.getElementById('btn-copy-room').addEventListener('click', () => {
@@ -1022,29 +1224,60 @@ class CodeSyncApp {
     });
 
     document.getElementById('btn-google-custom-submit').addEventListener('click', () => {
+      const errEl = document.getElementById('auth-error-msg');
+      errEl.classList.add('hidden');
+
       const nameVal = document.getElementById('google-custom-name').value.trim();
       const emailVal = document.getElementById('google-custom-email').value.trim().toLowerCase();
+      const passEl = document.getElementById('google-custom-password');
+      const passwordVal = passEl ? passEl.value : '';
+
       if (!emailVal || !emailVal.includes('@')) {
-        this.showToast('Please enter a valid Google email address.');
+        errEl.textContent = 'Please enter a valid Google email address.';
+        errEl.classList.remove('hidden');
         return;
       }
-      const displayName = nameVal || emailVal.split('@')[0];
+
+      if (!passwordVal || passwordVal.length < 4) {
+        errEl.textContent = 'Please enter your account password (minimum 4 characters).';
+        errEl.classList.remove('hidden');
+        return;
+      }
+
       const accounts = this._getStoredAccounts();
       const existing = accounts.find(a => a.email === emailVal);
-      const colorObj = existing
-        ? (USER_COLORS.find(c => c.hex === existing.color) || USER_COLORS[0])
-        : (USER_COLORS.find(c => c.hex === this.currentUser.color) || USER_COLORS[0]);
+      const hashedInput = btoa(encodeURIComponent(passwordVal));
 
-      if (!existing) {
-        accounts.push({
-          name: displayName,
-          email: emailVal,
+      if (existing) {
+        if (existing.passwordHash !== hashedInput) {
+          errEl.textContent = 'Incorrect password for this account. Please try again.';
+          errEl.classList.remove('hidden');
+          return;
+        }
+        const colorObj = USER_COLORS.find(c => c.hex === existing.color) || USER_COLORS[0];
+        this._completeSignIn({
+          name: nameVal || existing.name,
+          email: existing.email,
           color: colorObj.hex,
           bg: colorObj.bg,
           authProvider: 'google'
         });
-        this._saveStoredAccounts(accounts);
+        return;
       }
+
+      const displayName = nameVal || emailVal.split('@')[0];
+      const colorObj = USER_COLORS.find(c => c.hex === this.currentUser.color) || USER_COLORS[0];
+
+      accounts.push({
+        name: displayName,
+        email: emailVal,
+        passwordHash: hashedInput,
+        color: colorObj.hex,
+        bg: colorObj.bg,
+        authProvider: 'google',
+        createdAt: Date.now()
+      });
+      this._saveStoredAccounts(accounts);
 
       this._completeSignIn({
         name: displayName,
@@ -1071,7 +1304,7 @@ class CodeSyncApp {
         const chosenHex = modal.dataset.selectedHex || this.currentUser.color;
         const chosenBg = modal.dataset.selectedBg || this.currentUser.bg;
 
-        if (accounts.some(a => a.email === email && a.authProvider === 'account')) {
+        if (accounts.some(a => a.email === email)) {
           errEl.textContent = 'An account with this email already exists. Please switch to Sign In.';
           errEl.classList.remove('hidden');
           return;
@@ -1104,7 +1337,7 @@ class CodeSyncApp {
           errEl.classList.remove('hidden');
           return;
         }
-        if (found.authProvider === 'account' && found.passwordHash !== btoa(encodeURIComponent(password))) {
+        if (found.passwordHash !== btoa(encodeURIComponent(password))) {
           errEl.textContent = 'Incorrect password. Please try again.';
           errEl.classList.remove('hidden');
           return;
@@ -1145,7 +1378,8 @@ class CodeSyncApp {
           email: this.currentUser.email,
           color: newHex,
           bg: newBg,
-          authProvider: this.currentUser.authProvider
+          authProvider: this.currentUser.authProvider,
+          authenticated: true
         }));
       }
 
@@ -1165,21 +1399,23 @@ class CodeSyncApp {
     });
 
     document.getElementById('stdin-input').addEventListener('input', (e) => {
-      this.collab?.sendStdinChange(e.target.value);
+      this.collab?.sendStdinChange(this.activeFileId, e.target.value);
     });
 
     document.getElementById('btn-clear-console').addEventListener('click', () => {
-      document.getElementById('stdout-output').textContent = '';
-      document.getElementById('stderr-output').textContent = '';
-      document.getElementById('exec-status-badge').className = 'exec-status-badge idle';
-      document.getElementById('exec-status-badge').textContent = 'Ready';
-      document.getElementById('exec-metrics').textContent = '';
+      const activeFile = this.collab?.state.files.find(f => f.id === this.activeFileId);
+      if (activeFile) {
+        activeFile.lastExecution = null;
+      }
+      this._resetConsoleUI(activeFile?.name || '');
     });
 
     document.getElementById('btn-toggle-sidebar').addEventListener('click', () => {
       const sb = document.getElementById('collab-sidebar');
-      sb.classList.toggle('collapsed');
-      setTimeout(() => this.editor?.layout(), 210);
+      const sbResizer = document.getElementById('resizer-sidebar');
+      const collapsed = sb.classList.toggle('collapsed');
+      if (sbResizer) sbResizer.classList.toggle('hidden', collapsed);
+      setTimeout(() => this.editor?.layout(), 60);
     });
 
     document.getElementById('chat-form').addEventListener('submit', (e) => {
@@ -1190,6 +1426,444 @@ class CodeSyncApp {
       this.collab.sendChatMessage(text, false);
       input.value = '';
     });
+
+    this._bindStudyModeEvents();
+  }
+
+  /* ============================================================================
+   * Code::Blocks-Style Draggable / Resizable Workspace Panes
+   * ============================================================================ */
+
+  _initResizablePanes() {
+    const terminalEl = document.getElementById('terminal-drawer');
+    const stdinEl = document.getElementById('stdin-pane');
+    const sidebarEl = document.getElementById('collab-sidebar');
+    const peersSectionEl = document.getElementById('collab-peers-section');
+
+    const resizerTerminal = document.getElementById('resizer-terminal');
+    const resizerStdin = document.getElementById('resizer-stdin');
+    const resizerSidebar = document.getElementById('resizer-sidebar');
+    const resizerCollabChat = document.getElementById('resizer-collab-chat');
+
+    const saveSizes = () => {
+      try {
+        localStorage.setItem('codesync_layout_sizes_v1', JSON.stringify({
+          terminalHeight: terminalEl ? terminalEl.offsetHeight : 250,
+          stdinWidth: stdinEl ? stdinEl.offsetWidth : 280,
+          sidebarWidth: sidebarEl ? sidebarEl.offsetWidth : 320,
+          peersHeight: peersSectionEl ? peersSectionEl.offsetHeight : 220
+        }));
+      } catch (_) {}
+    };
+
+    // Restore saved layout sizes
+    try {
+      const saved = JSON.parse(localStorage.getItem('codesync_layout_sizes_v1'));
+      if (saved) {
+        if (terminalEl && saved.terminalHeight >= 110) terminalEl.style.height = `${saved.terminalHeight}px`;
+        if (stdinEl && saved.stdinWidth >= 140) stdinEl.style.width = `${saved.stdinWidth}px`;
+        if (sidebarEl && saved.sidebarWidth >= 220) sidebarEl.style.width = `${saved.sidebarWidth}px`;
+        if (peersSectionEl && saved.peersHeight >= 90) peersSectionEl.style.height = `${saved.peersHeight}px`;
+      }
+    } catch (_) {}
+
+    const attachDrag = (handleEl, direction, onDrag) => {
+      if (!handleEl) return;
+      handleEl.addEventListener('mousedown', (startEvt) => {
+        startEvt.preventDefault();
+        handleEl.classList.add('active');
+        document.body.classList.add(direction === 'col' ? 'is-resizing-col' : 'is-resizing-row');
+
+        const startX = startEvt.clientX;
+        const startY = startEvt.clientY;
+        const initialMetrics = {
+          terminalH: terminalEl ? terminalEl.offsetHeight : 250,
+          stdinW: stdinEl ? stdinEl.offsetWidth : 280,
+          sidebarW: sidebarEl ? sidebarEl.offsetWidth : 320,
+          peersH: peersSectionEl ? peersSectionEl.offsetHeight : 220
+        };
+
+        const onMouseMove = (moveEvt) => {
+          const dx = moveEvt.clientX - startX;
+          const dy = moveEvt.clientY - startY;
+          onDrag(dx, dy, initialMetrics);
+          this.editor?.layout();
+        };
+
+        const onMouseUp = () => {
+          handleEl.classList.remove('active');
+          document.body.classList.remove('is-resizing-col', 'is-resizing-row');
+          window.removeEventListener('mousemove', onMouseMove);
+          window.removeEventListener('mouseup', onMouseUp);
+          saveSizes();
+          this.editor?.layout();
+        };
+
+        window.addEventListener('mousemove', onMouseMove);
+        window.addEventListener('mouseup', onMouseUp);
+      });
+    };
+
+    // 1. Editor <-> Compiler Output & Stdin (Drag up/down)
+    attachDrag(resizerTerminal, 'row', (_dx, dy, init) => {
+      if (!terminalEl) return;
+      const splitContainer = document.getElementById('editor-console-split');
+      const maxH = splitContainer ? Math.max(180, splitContainer.offsetHeight - 150) : window.innerHeight * 0.7;
+      const nextH = Math.min(maxH, Math.max(110, init.terminalH - dy));
+      terminalEl.style.height = `${nextH}px`;
+    });
+
+    // 2. Stdin <-> Stdout inside Compiler Console (Drag left/right)
+    attachDrag(resizerStdin, 'col', (dx, _dy, init) => {
+      if (!stdinEl) return;
+      const bodyEl = document.getElementById('terminal-body-grid');
+      const maxW = bodyEl ? Math.max(200, bodyEl.offsetWidth - 180) : 600;
+      const nextW = Math.min(maxW, Math.max(140, init.stdinW + dx));
+      stdinEl.style.width = `${nextW}px`;
+    });
+
+    // 3. Editor Column <-> Right Sidebar (Room Collaborators & Live Chat) (Drag left/right)
+    attachDrag(resizerSidebar, 'col', (dx, _dy, init) => {
+      if (!sidebarEl) return;
+      const maxW = Math.max(260, Math.min(580, window.innerWidth - 360));
+      const nextW = Math.min(maxW, Math.max(220, init.sidebarW - dx));
+      sidebarEl.style.width = `${nextW}px`;
+    });
+
+    // 4. Room Collaborators <-> Live Room Chat inside Sidebar (Drag up/down)
+    attachDrag(resizerCollabChat, 'row', (_dx, dy, init) => {
+      if (!peersSectionEl || !sidebarEl) return;
+      const maxH = Math.max(130, sidebarEl.offsetHeight - 170);
+      const nextH = Math.min(maxH, Math.max(90, init.peersH + dy));
+      peersSectionEl.style.height = `${nextH}px`;
+    });
+  }
+
+  /* ============================================================================
+   * Study Mode: Normal Working Time Stopwatch & 60m Work / 5m Break Pomodoro
+   * ============================================================================ */
+
+  _initStudyMode() {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem('codesync_study_state_v1'));
+      if (saved) {
+        this.studyState.mode = saved.mode || 'normal';
+        this.studyState.pomoPhase = saved.pomoPhase || 'work';
+        this.studyState.normalSeconds = Number(saved.normalSeconds) || 0;
+        this.studyState.pomoRemainingSec = Number(saved.pomoRemainingSec) || 3600;
+        this.studyState.totalWorkedSec = Number(saved.totalWorkedSec) || 0;
+      }
+    } catch (_) {}
+    this._renderStudyModeUI();
+  }
+
+  _saveStudyState() {
+    try {
+      sessionStorage.setItem('codesync_study_state_v1', JSON.stringify({
+        mode: this.studyState.mode,
+        pomoPhase: this.studyState.pomoPhase,
+        normalSeconds: this.studyState.normalSeconds,
+        pomoRemainingSec: this.studyState.pomoRemainingSec,
+        totalWorkedSec: this.studyState.totalWorkedSec
+      }));
+    } catch (_) {}
+  }
+
+  _bindStudyModeEvents() {
+    const pillTrigger = document.getElementById('study-pill-trigger');
+    const popover = document.getElementById('study-popover');
+    const closePopoverBtn = document.getElementById('btn-close-study-popover');
+    const quickToggleBtn = document.getElementById('btn-study-quick-toggle');
+    const startPauseBtn = document.getElementById('btn-study-start-pause');
+    const resetBtn = document.getElementById('btn-study-reset');
+    const skipPhaseBtn = document.getElementById('btn-study-skip-phase');
+    const testAlertBtn = document.getElementById('btn-study-test-alert');
+
+    pillTrigger.addEventListener('click', (e) => {
+      e.stopPropagation();
+      popover.classList.toggle('hidden');
+    });
+
+    closePopoverBtn.addEventListener('click', () => {
+      popover.classList.add('hidden');
+    });
+
+    document.addEventListener('click', (e) => {
+      const wrapper = document.getElementById('study-mode-wrapper');
+      if (wrapper && !wrapper.contains(e.target)) {
+        popover.classList.add('hidden');
+      }
+    });
+
+    quickToggleBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.toggleStudyTimer();
+    });
+
+    startPauseBtn.addEventListener('click', () => {
+      this.toggleStudyTimer();
+    });
+
+    resetBtn.addEventListener('click', () => {
+      this.resetStudyTimer();
+    });
+
+    document.querySelectorAll('.study-type-tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        this.setStudyModeType(tab.dataset.studyType);
+      });
+    });
+
+    skipPhaseBtn.addEventListener('click', () => {
+      if (this.studyState.pomoPhase === 'work') {
+        this._triggerPomodoroBreakAlert();
+      } else {
+        this._startPomodoroWorkPhase();
+      }
+    });
+
+    testAlertBtn.addEventListener('click', () => {
+      popover.classList.add('hidden');
+      this._triggerPomodoroBreakAlert();
+    });
+
+    document.getElementById('btn-pomo-start-break').addEventListener('click', () => {
+      document.getElementById('pomodoro-break-modal').classList.add('hidden');
+      this.studyState.mode = 'pomodoro';
+      this.studyState.pomoPhase = 'break';
+      this.studyState.pomoRemainingSec = 5 * 60;
+      if (!this.studyState.isRunning) {
+        this.toggleStudyTimer(true);
+      }
+      this._renderStudyModeUI();
+      this.showToast('5-minute break timer started! Relax and recharge ☕');
+    });
+
+    document.getElementById('btn-pomo-skip-break').addEventListener('click', () => {
+      document.getElementById('pomodoro-break-modal').classList.add('hidden');
+      this._startPomodoroWorkPhase();
+    });
+  }
+
+  setStudyModeType(type) {
+    this.studyState.mode = type === 'pomodoro' ? 'pomodoro' : 'normal';
+    this._saveStudyState();
+    this._renderStudyModeUI();
+    this._broadcastStudyPresence();
+  }
+
+  toggleStudyTimer(forceRun = null) {
+    const shouldRun = forceRun !== null ? forceRun : !this.studyState.isRunning;
+    this.studyState.isRunning = shouldRun;
+
+    if (this.studyState.intervalId) {
+      clearInterval(this.studyState.intervalId);
+      this.studyState.intervalId = null;
+    }
+
+    if (shouldRun) {
+      this.studyState.intervalId = setInterval(() => {
+        this._tickStudyTimer();
+      }, 1000);
+    }
+
+    this._renderStudyModeUI();
+    this._broadcastStudyPresence();
+  }
+
+  resetStudyTimer() {
+    this.toggleStudyTimer(false);
+    if (this.studyState.mode === 'normal') {
+      this.studyState.normalSeconds = 0;
+    } else {
+      this.studyState.pomoPhase = 'work';
+      this.studyState.pomoRemainingSec = 3600;
+    }
+    this._saveStudyState();
+    this._renderStudyModeUI();
+    this._broadcastStudyPresence();
+    this.showToast('Study timer reset.');
+  }
+
+  _tickStudyTimer() {
+    if (this.studyState.mode === 'normal') {
+      this.studyState.normalSeconds += 1;
+      this.studyState.totalWorkedSec += 1;
+    } else {
+      if (this.studyState.pomoPhase === 'work') {
+        this.studyState.totalWorkedSec += 1;
+        this.studyState.normalSeconds += 1;
+      }
+
+      if (this.studyState.pomoRemainingSec > 0) {
+        this.studyState.pomoRemainingSec -= 1;
+      }
+
+      const modalDigits = document.getElementById('pomo-modal-countdown');
+      if (modalDigits && this.studyState.pomoPhase === 'break') {
+        modalDigits.textContent = this._formatMMSS(this.studyState.pomoRemainingSec);
+      }
+
+      if (this.studyState.pomoRemainingSec <= 0) {
+        if (this.studyState.pomoPhase === 'work') {
+          this._triggerPomodoroBreakAlert();
+        } else {
+          this._playStudyChime();
+          this.showToast('5-minute break finished! Starting new 1-hour Pomodoro work session.');
+          this._startPomodoroWorkPhase();
+        }
+      }
+    }
+
+    if (this.studyState.totalWorkedSec % 10 === 0) {
+      this._saveStudyState();
+      this._broadcastStudyPresence();
+    }
+    this._renderStudyModeUI();
+  }
+
+  _triggerPomodoroBreakAlert() {
+    this._playStudyChime();
+    this.studyState.mode = 'pomodoro';
+    this.studyState.pomoPhase = 'break';
+    this.studyState.pomoRemainingSec = 5 * 60;
+    this._saveStudyState();
+
+    if (!this.studyState.isRunning) {
+      this.toggleStudyTimer(true);
+    }
+
+    const modal = document.getElementById('pomodoro-break-modal');
+    const modalDigits = document.getElementById('pomo-modal-countdown');
+    if (modalDigits) modalDigits.textContent = '05:00';
+    modal.classList.remove('hidden');
+
+    this._renderStudyModeUI();
+    this._broadcastStudyPresence();
+
+    if (this.collab) {
+      this.collab.sendChatMessage(
+        `☕ ${this.currentUser.name} completed 1 hour of Pomodoro work and started a 5-minute break!`,
+        true
+      );
+    }
+  }
+
+  _startPomodoroWorkPhase() {
+    this.studyState.mode = 'pomodoro';
+    this.studyState.pomoPhase = 'work';
+    this.studyState.pomoRemainingSec = 3600;
+    this._saveStudyState();
+    this._renderStudyModeUI();
+    this._broadcastStudyPresence();
+    this.showToast('Pomodoro 1-hour work session active.');
+  }
+
+  _broadcastStudyPresence() {
+    if (!this.collab) return;
+    let statusText = null;
+    if (this.studyState.isRunning) {
+      if (this.studyState.mode === 'pomodoro' && this.studyState.pomoPhase === 'break') {
+        statusText = `☕ On 5m Break (${this._formatMMSS(this.studyState.pomoRemainingSec)})`;
+      } else if (this.studyState.mode === 'pomodoro') {
+        statusText = `🍅 Pomodoro Work (${this._formatMMSS(this.studyState.pomoRemainingSec)} left)`;
+      } else {
+        const mins = Math.floor(this.studyState.normalSeconds / 60);
+        statusText = `⏱ Studying (${mins}m)`;
+      }
+    }
+    this.currentUser.studyStatus = statusText;
+    this.collab.updateLocalUser({ studyStatus: statusText });
+  }
+
+  _renderStudyModeUI() {
+    const wrapper = document.getElementById('study-mode-wrapper');
+    const badgeEl = document.getElementById('study-mode-label');
+    const timerDisplayEl = document.getElementById('study-timer-display');
+    const quickBtn = document.getElementById('btn-study-quick-toggle');
+    const startPauseBtn = document.getElementById('btn-study-start-pause');
+    const bigDigitsEl = document.getElementById('study-big-digits');
+    const phaseTagEl = document.getElementById('study-phase-tag');
+    const totalWorkedEl = document.getElementById('study-total-worked');
+    const pomoActionsEl = document.getElementById('study-pomo-actions');
+    const clockCardEl = document.getElementById('study-clock-card');
+
+    if (!wrapper) return;
+
+    const { mode, pomoPhase, isRunning, normalSeconds, pomoRemainingSec, totalWorkedSec } = this.studyState;
+
+    const isBreak = mode === 'pomodoro' && pomoPhase === 'break';
+    wrapper.classList.toggle('running', isRunning && !isBreak);
+    wrapper.classList.toggle('break-mode', isBreak);
+    clockCardEl.classList.toggle('break-active', isBreak);
+
+    document.querySelectorAll('.study-type-tab').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.studyType === mode);
+    });
+
+    pomoActionsEl.classList.toggle('hidden', mode !== 'pomodoro');
+
+    const formattedTime = mode === 'normal'
+      ? this._formatHHMMSS(normalSeconds)
+      : this._formatMMSS(pomoRemainingSec);
+
+    timerDisplayEl.textContent = formattedTime;
+    bigDigitsEl.textContent = formattedTime;
+
+    if (mode === 'normal') {
+      badgeEl.textContent = 'Study';
+      phaseTagEl.textContent = isRunning ? 'WORKING TIME (LIVE)' : 'WORKING TIME (PAUSED)';
+    } else if (isBreak) {
+      badgeEl.textContent = 'Break 5m';
+      phaseTagEl.textContent = '☕ 5-MINUTE REST BREAK';
+    } else {
+      badgeEl.textContent = 'Pomodoro';
+      phaseTagEl.textContent = '🍅 1-HOUR FOCUS SESSION (60M)';
+    }
+
+    quickBtn.textContent = isRunning ? '⏸' : '▶';
+    startPauseBtn.textContent = isRunning ? 'Pause Timer' : 'Start Timer';
+
+    const totalMins = Math.floor(totalWorkedSec / 60);
+    const totalHrs = Math.floor(totalMins / 60);
+    const remMins = totalMins % 60;
+    totalWorkedEl.textContent = totalHrs > 0
+      ? `Total working time: ${totalHrs}h ${remMins}m`
+      : `Total working time: ${totalMins}m ${totalWorkedSec % 60}s`;
+  }
+
+  _formatHHMMSS(totalSec) {
+    const hrs = Math.floor(totalSec / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const secs = totalSec % 60;
+    return [hrs, mins, secs].map(v => String(v).padStart(2, '0')).join(':');
+  }
+
+  _formatMMSS(totalSec) {
+    const mins = Math.floor(totalSec / 60);
+    const secs = totalSec % 60;
+    return [mins, secs].map(v => String(v).padStart(2, '0')).join(':');
+  }
+
+  _playStudyChime() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const notes = [523.25, 659.25, 783.99, 1046.5];
+      notes.forEach((freq, idx) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, ctx.currentTime + idx * 0.14);
+        gain.gain.setValueAtTime(0.16, ctx.currentTime + idx * 0.14);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + idx * 0.14 + 0.45);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(ctx.currentTime + idx * 0.14);
+        osc.stop(ctx.currentTime + idx * 0.14 + 0.45);
+      });
+    } catch (_) {}
   }
 
   showToast(message) {
