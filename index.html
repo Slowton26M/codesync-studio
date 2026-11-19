@@ -16,7 +16,7 @@
     <header class="top-navbar">
       <!-- Brand & Room Cluster -->
       <div class="brand-cluster">
-        <div class="brand-logo" id="btn-room-settings" title="Change Room or Customize Your Color & Name">
+        <div class="brand-logo" id="btn-room-settings" title="Room & Collaborator Settings">
           <div class="brand-icon">&lt;/&gt;</div>
           <div>
             <div>CodeSync <span style="color:#818cf8;font-weight:500">Studio</span></div>
@@ -25,7 +25,7 @@
 
         <div class="divider-v"></div>
 
-        <!-- Active Room Badge & Quick Actions -->
+        <!-- Active Room Badge & Share Action -->
         <div class="room-pill-group">
           <span class="room-status-dot" title="Real-time P2P & Tab Sync Active"></span>
           <span class="room-label">Room</span>
@@ -37,22 +37,13 @@
             </svg>
             <span>Share</span>
           </button>
-          <button type="button" class="btn-icon-pill" id="btn-open-twin-tab" title="Open a second browser tab in this room to test multi-user colored cursors">
+          <button type="button" class="btn-icon-pill" id="btn-change-room" title="Join or create another Room ID">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M15 3h6v6"></path>
+              <path d="M10 14 21 3"></path>
               <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path>
-              <polyline points="15 3 21 3 21 9"></polyline>
-              <line x1="10" y1="14" x2="21" y2="3"></line>
             </svg>
-            <span>+2nd Tab</span>
-          </button>
-          <button type="button" class="btn-icon-pill" id="btn-demo-peer" title="Spawn a simulated collaborator with live colored cursor & selection">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
-              <circle cx="9" cy="7" r="4"></circle>
-              <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
-              <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
-            </svg>
-            <span>Simulate Peer</span>
+            <span>Room</span>
           </button>
         </div>
       </div>
@@ -90,9 +81,19 @@
         </button>
       </div>
 
-      <!-- Right Presence Stack & Sidebar Toggle -->
+      <!-- Right Presence Stack, Auth Button & Sidebar Toggle -->
       <div class="presence-cluster">
         <div class="avatar-stack" id="presence-avatar-stack"></div>
+
+        <!-- Sign In / Create Account Button (Visible when Guest) -->
+        <button type="button" class="btn-auth-header" id="btn-auth-trigger" title="Sign in with Google or Create Account">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path>
+            <polyline points="10 17 15 12 10 7"></polyline>
+            <line x1="15" y1="12" x2="3" y2="12"></line>
+          </svg>
+          <span>Sign In</span>
+        </button>
 
         <button type="button" class="btn-icon-pill" id="btn-toggle-sidebar" title="Toggle Presence & Room Chat Sidebar">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -210,13 +211,143 @@
     </main>
   </div>
 
-  <!-- Room & User Color Customization Modal -->
+  <!-- Authentication Modal: Google Sign-In & Create Account / Login -->
+  <div class="modal-backdrop hidden" id="auth-modal">
+    <div class="modal-card auth-modal-card">
+      <div class="auth-header-row">
+        <div>
+          <h2 class="modal-title" id="auth-modal-title">Welcome to CodeSync Studio</h2>
+          <p class="modal-subtitle" id="auth-modal-subtitle">
+            Sign in with Google or create an account to save your identity, cursor color, and rooms.
+          </p>
+        </div>
+        <button type="button" class="btn-modal-x" id="btn-close-auth-modal" aria-label="Close">&times;</button>
+      </div>
+
+      <!-- Auth Tabs: Sign In vs Create Account -->
+      <div class="auth-tabs" role="tablist">
+        <button type="button" class="auth-tab active" data-auth-tab="signin" id="tab-btn-signin">
+          Sign In
+        </button>
+        <button type="button" class="auth-tab" data-auth-tab="signup" id="tab-btn-signup">
+          Create Account
+        </button>
+      </div>
+
+      <!-- Continue with Google Button -->
+      <button type="button" class="btn-google-oauth" id="btn-google-signin">
+        <svg width="18" height="18" viewBox="0 0 48 48">
+          <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+          <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+          <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+          <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+        </svg>
+        <span>Continue with Google</span>
+      </button>
+
+      <!-- Interactive Google Account Picker Drawer (Zero-config Google OAuth simulation & custom Gmail login) -->
+      <div class="google-picker-drawer hidden" id="google-picker-drawer">
+        <div class="google-picker-header">
+          <span>Choose a Google Account to continue to <strong>CodeSync Studio</strong></span>
+        </div>
+        <div class="google-accounts-list" id="google-accounts-list"></div>
+        <div class="google-custom-row">
+          <input
+            type="text"
+            id="google-custom-name"
+            class="form-input"
+            placeholder="Your Name (e.g. Minh Huynh)"
+            style="margin-bottom:6px;padding:8px 10px;font-size:12.5px"
+          />
+          <div style="display:flex;gap:6px">
+            <input
+              type="email"
+              id="google-custom-email"
+              class="form-input"
+              placeholder="your.email@gmail.com"
+              style="padding:8px 10px;font-size:12.5px"
+            />
+            <button type="button" class="btn-google-confirm" id="btn-google-custom-submit">
+              Continue
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="auth-divider">
+        <span>or continue with email</span>
+      </div>
+
+      <!-- Email / Password Form -->
+      <form id="auth-form">
+        <div class="form-group hidden" id="auth-name-group">
+          <label class="form-label" for="auth-name-input">Full Name</label>
+          <input
+            type="text"
+            id="auth-name-input"
+            class="form-input"
+            placeholder="e.g. Alex Rivera"
+            maxlength="32"
+          />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="auth-email-input">Email Address</label>
+          <input
+            type="email"
+            id="auth-email-input"
+            class="form-input"
+            placeholder="you@example.com"
+            required
+          />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="auth-password-input">Password</label>
+          <input
+            type="password"
+            id="auth-password-input"
+            class="form-input"
+            placeholder="••••••••"
+            minlength="4"
+            required
+          />
+        </div>
+
+        <div class="form-group hidden" id="auth-color-group">
+          <label class="form-label">Your Collaborator Cursor Color</label>
+          <div class="color-swatches-grid" id="auth-color-swatches"></div>
+        </div>
+
+        <div class="auth-error-msg hidden" id="auth-error-msg"></div>
+
+        <div class="modal-actions" style="margin-top:18px">
+          <button type="submit" class="btn-primary-lg" id="btn-auth-submit">
+            Sign In to CodeSync
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Room & User Profile Customization Modal -->
   <div class="modal-backdrop hidden" id="profile-modal">
     <div class="modal-card">
-      <h2 class="modal-title">Room &amp; Collaborator Identity</h2>
-      <p class="modal-subtitle">
-        Customize your display name and Google Docs-style cursor color, or join/create any room code.
-      </p>
+      <div class="auth-header-row">
+        <div>
+          <h2 class="modal-title">Room &amp; Collaborator Settings</h2>
+          <p class="modal-subtitle">
+            Customize your display name, Google Docs-style cursor color, or switch rooms.
+          </p>
+        </div>
+        <button type="button" class="btn-modal-x" id="btn-close-modal" aria-label="Close">&times;</button>
+      </div>
+
+      <!-- Current Account Status Card -->
+      <div class="account-status-banner" id="profile-account-banner">
+        <div id="profile-account-summary">Playing as Guest</div>
+        <button type="button" class="btn-icon-pill" id="btn-profile-auth-action">Sign In</button>
+      </div>
 
       <form id="profile-form">
         <div class="form-group">
@@ -253,7 +384,7 @@
         </div>
 
         <div class="modal-actions">
-          <button type="button" class="btn-secondary-lg" id="btn-close-modal">Cancel</button>
+          <button type="button" class="btn-secondary-lg" id="btn-cancel-profile-modal">Cancel</button>
           <button type="submit" class="btn-primary-lg">Save &amp; Sync Room</button>
         </div>
       </form>
