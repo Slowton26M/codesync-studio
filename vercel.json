@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "cleanUrls": true,
+  "trailingSlash": false,
+  "rewrites": [
+    {
+      "source": "/room/:roomId",
+      "destination": "/index.html?room=:roomId"
+    }
+  ]
+}
